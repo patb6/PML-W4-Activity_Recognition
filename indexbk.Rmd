@@ -1,0 +1,180 @@
+---
+title: "PML - Qualitative Activity Recognition"
+author: "Patrick Brooks"
+date: "04/04/2020"
+output: 
+  html_document: 
+    keep_md: yes
+    pandoc_args: !expr rmdfiltr::add_wordcount_filter(rmdfiltr::add_citeproc_filter(args = NULL))
+
+---
+
+```{r setup_libraries, warning= FALSE,  message= FALSE,  echo= FALSE}
+# Set Environment 
+knitr::opts_chunk$set(echo = TRUE)
+#library(rmdfiltr)
+library(doParallel)
+library(caret)
+library(randomForest)
+#library(rattle)   # Print Random Forests
+#library(corrplot) # Plotting variables that are correlated
+library(FactoMineR)
+library(factoextra) # PCA visualization
+library(e1071)
+
+# Calculate vector magnatude. 
+mag <- function(x = double,y = double,z =double){ d = sqrt(x^2 + y^2 + z^2); d}
+
+```
+<!---- COMMENT  --->
+# Executive Summary
+The goal of your project is to predict the manner in which subjects did a simple arm curl exercise.
+A Random Forest model was selected for modeling the behaviors.
+Labeled data was provided with 5 categories:  
+A: exactly according to the specification,  
+B: throwing the elbows to the front,  
+C: lifting the dumbbell only halfway,  
+D: lowering the dumbbell only halfway and  
+E: throwing the hips to the front   
+The final model class error rates:  
+   A      B      C      D      E    
+0.0024 0.0202 0.0170 0.0171 0.0074 
+
+This writeup proceeds with a discussion of data structure and cleaning, model development and presentation of final model results.
+
+
+```{r read_source, echo= FALSE}
+# Read file and convert "#DIV/0!" to NA - change outcome variable to factor
+pml_train = read.csv("./pml-training.csv", stringsAsFactors=FALSE, na.strings = c("NA", "#DIV/0!")) # Read file
+pml_test  = read.csv("./pml-testing.csv",  stringsAsFactors=FALSE, na.strings = c("NA", "#DIV/0!")) # Read file
+pml_train$classe = as.factor(pml_train$classe)
+pml_train$new_window = as.factor(pml_train$new_window)
+# pml_test$classe =  as.factor(pml_test$classe) - Values not provided
+pml_test$new_window = as.factor((pml_test$new_window))
+
+```
+
+# Data Structure and cleaning
+A primary challenge with the data structure is that columns for skewness and kurtosis were not populated.  These columns were also N/A in the test set.  In some cases there was missing data.  Columns were removed that had N/A.
+Another approuch used in this data analysis was to use replace the vector components with the magnatude of vectors using a simple function: 
+mag = sqrt(var_x^2 + var_y^2 + var_z^2)
+
+```{r data_cleaning, echo=FALSE}
+
+# remove columns with missing data AND were not part selected as features.  Not mentioned as a festure in
+# original paaper.
+
+# Remove columns that are NA in training and test sets.
+c = c() ; n=0;for (i in 1:160) { x = sum(is.na(pml_train[,i])); 
+if(x>0) {n=n+1; c[length(c)+1] = i }}
+# paste("col remove = ",n) 
+# print("Column list:"); c
+
+# drop columns not used or missing data
+pml_train_clean = subset(pml_train, select=-c(1:7, c))
+pml_test_clean  = subset(pml_test,  select=-c(1:7, c))
+
+
+### for training data calculate magnitude of vectors
+pml_train_clean$gyros_belt_mag = mag(pml_train_clean$gyros_belt_x, pml_train_clean$gyros_belt_y, pml_train_clean$gyros_belt_z)
+pml_train_clean$accel_belt_mag = mag(pml_train_clean$accel_belt_x, pml_train_clean$accel_belt_y, pml_train_clean$accel_belt_z)
+pml_train_clean$magnet_belt_mag = mag(pml_train_clean$magnet_belt_x, pml_train_clean$magnet_belt_y, pml_train_clean$magnet_belt_z)
+
+pml_train_clean$gyros_arm_mag = mag(pml_train_clean$gyros_arm_x, pml_train_clean$gyros_arm_y, pml_train_clean$gyros_arm_z)
+pml_train_clean$accel_arm_mag = mag(pml_train_clean$accel_arm_x, pml_train_clean$accel_arm_y, pml_train_clean$accel_arm_z)
+pml_train_clean$magnet_arm_mag = mag(pml_train_clean$magnet_arm_x, pml_train_clean$magnet_arm_y, pml_train_clean$magnet_arm_z)
+
+pml_train_clean$gyros_dumbbell_mag = mag(pml_train_clean$gyros_dumbbell_x, pml_train_clean$gyros_dumbbell_y, pml_train_clean$gyros_dumbbell_z)
+pml_train_clean$accel_dumbbell_mag = mag(pml_train_clean$accel_dumbbell_x, pml_train_clean$accel_dumbbell_y, pml_train_clean$accel_dumbbell_z)
+pml_train_clean$magnet_dumbbell_mag = mag(pml_train_clean$magnet_dumbbell_x, pml_train_clean$magnet_dumbbell_y, pml_train_clean$magnet_dumbbell_z)
+
+pml_train_clean$gyros_forearm_mag = mag(pml_train_clean$gyros_forearm_x, pml_train_clean$gyros_forearm_y, pml_train_clean$gyros_forearm_z)
+pml_train_clean$accel_forearm_mag = mag(pml_train_clean$accel_forearm_x, pml_train_clean$accel_forearm_y, pml_train_clean$accel_forearm_z)
+pml_train_clean$magnet_forearm_mag = mag(pml_train_clean$magnet_forearm_x, pml_train_clean$magnet_forearm_y, pml_train_clean$magnet_forearm_z)
+
+# replace vector direction w/magnitudes
+pml_train_mag = pml_train_clean[c(1:4,14:17,27:30,40:43,54:65,53)]
+
+### for training data calculate magnitude of vectors
+
+pml_test_clean$gyros_belt_mag = mag(pml_test_clean$gyros_belt_x, pml_test_clean$gyros_belt_y, pml_test_clean$gyros_belt_z)
+pml_test_clean$accel_belt_mag = mag(pml_test_clean$accel_belt_x, pml_test_clean$accel_belt_y, pml_test_clean$accel_belt_z)
+pml_test_clean$magnet_belt_mag = mag(pml_test_clean$magnet_belt_x, pml_test_clean$magnet_belt_y, pml_test_clean$magnet_belt_z)
+
+pml_test_clean$gyros_arm_mag = mag(pml_test_clean$gyros_arm_x, pml_test_clean$gyros_arm_y, pml_test_clean$gyros_arm_z)
+pml_test_clean$accel_arm_mag = mag(pml_test_clean$accel_arm_x, pml_test_clean$accel_arm_y, pml_test_clean$accel_arm_z)
+pml_test_clean$magnet_arm_mag = mag(pml_test_clean$magnet_arm_x, pml_test_clean$magnet_arm_y, pml_test_clean$magnet_arm_z)
+
+pml_test_clean$gyros_dumbbell_mag = mag(pml_test_clean$gyros_dumbbell_x, pml_test_clean$gyros_dumbbell_y, pml_test_clean$gyros_dumbbell_z)
+pml_test_clean$accel_dumbbell_mag = mag(pml_test_clean$accel_dumbbell_x, pml_test_clean$accel_dumbbell_y, pml_test_clean$accel_dumbbell_z)
+pml_test_clean$magnet_dumbbell_mag = mag(pml_test_clean$magnet_dumbbell_x, pml_test_clean$magnet_dumbbell_y, pml_test_clean$magnet_dumbbell_z)
+
+pml_test_clean$gyros_forearm_mag = mag(pml_test_clean$gyros_forearm_x, pml_test_clean$gyros_forearm_y, pml_test_clean$gyros_forearm_z)
+pml_test_clean$accel_forearm_mag = mag(pml_test_clean$accel_forearm_x, pml_test_clean$accel_forearm_y, pml_test_clean$accel_forearm_z)
+pml_test_clean$magnet_forearm_mag = mag(pml_test_clean$magnet_forearm_x, pml_test_clean$magnet_forearm_y, pml_test_clean$magnet_forearm_z)
+
+# replace vector direction w/magnitudes
+pml_test_mag = pml_test_clean[c(1:4,14:17,27:30,40:43,54:65,53)]
+
+print(paste("Dimension of training set:  ","rows:",dim(pml_train_clean)[1], 
+            " variables",dim(pml_train_clean)[2]))
+print(paste("Dimension of test     set:  ","rows:",dim(pml_test_clean)[1], 
+            " variables",dim(pml_test_clean)[2]))
+
+# Since "test" set is for the quiz - split the training set into two groups train & subtest
+set.seed(12345)
+inTrain <- createDataPartition(y=pml_train_mag$classe, p=0.6, list = FALSE)
+pml_subTrain = pml_train_mag[ inTrain, ]
+pml_subTest  = pml_train_mag[-inTrain, ]
+
+print("Split the training set into a training and validation set")
+print(paste("Dimension of subTrain set:  ","rows:",dim(pml_subTrain)[1], 
+            " variables",dim(pml_subTrain)[2]))
+print("Labeled data for subTrain set")
+table(pml_subTrain$classe)
+
+print(paste("Dimension of subTest set:  ","rows:",dim(pml_subTest)[1], 
+            " variables",dim(pml_subTest)[2]))
+print("Labeled data for subTest set")
+table(pml_subTest$classe)
+
+```
+
+# Model Development
+This section examines features of the training dataset and develops a model for prediction.
+Once the datasets were cleaned the training data set was divided into a sub-train and sub-test group.
+Several models were fit to the data to examine features and model use of prediction
+
+## Data Dimensionality - Principle components
+
+A Principle Component analysis was performed. The first two dimensions are shown in the graphic.  Although there does appear to be structure in the data the structure do not seem to related to the exercise labels (A-E).
+
+```{r principle_componet, echo=FALSE}
+# Principle component analysis of 'predictor' variables [,1:28]
+prmod = PCA(pml_subTrain[,c(1:28)], graph = FALSE, ncp = 15, scale.unit = TRUE)
+fviz_eig(prmod, addlabels = TRUE, ylim =c(0,20))
+
+# Remove single extreme valuse and and rerun PCA
+# pml_train[5373,] is pml_subTrain[3222,]
+pml_subTrain1 = pml_subTrain[-c(3222),]
+prmod2 = PCA(pml_subTrain1[,c(1:28)], graph = FALSE, ncp = 15, scale.unit = TRUE)
+fviz_pca_ind(prmod2, axes = c(1,2), geom = c("point"), 
+             col.ind = pml_subTrain1$classe, addEllipses = TRUE)
+
+```
+
+## Modeling
+The random forest model was run against the subTest sample (selected from the original training data).  Overall accuracy of 0.99  
+OOB estimate of  error rate: 1.17%
+
+```{r random_forest, echo= FALSE}
+rfmod = train(classe ~., pml_subTrain1, preProcess = c("center", "scale"), method = "rf")
+rfprd = predict(rfmod, pml_subTest)
+confusionMatrix(rfprd, pml_subTest$classe, dnn = c("Prediction", "Actual Response"))
+
+```
+
+# Appendix - Code used
+```{r test_collecting_code, ref.label=knitr::all_labels(), echo = TRUE, eval = FALSE}
+
+# End collective code
